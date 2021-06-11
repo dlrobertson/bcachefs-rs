@@ -1,0 +1,5 @@
+/target
+# For now ignore the Cargo.lock, but it should
+# be checked in at some point if we get more
+# cerial about this project
+Cargo.lock
