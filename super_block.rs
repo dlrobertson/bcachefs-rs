@@ -848,7 +848,7 @@ impl<T: AsMut<[u8]>> MemberField<T> {
         if buf.len() < range.end || member_offsets::FLAGS.end < range.end {
             Err(BchError::Exhausted)
         } else if val > max {
-            Err(BchError::Einval)
+            Err(BchError::Einval(format!("{} > {}", val, max)))
         } else {
             let mut field = LittleEndian::read_u64(&buf[range.clone()]);
             field &= !(max << flag.1.start);
@@ -864,6 +864,8 @@ pub struct SuperBlockFlag(usize, Range<u64>);
 
 impl SuperBlockFlag {
     // index 0
+    /// Bitmask for action to take on error
+    pub const ERROR_ACTION: SuperBlockFlag = SuperBlockFlag(0, 8..12);
     /// Bitmask for btree node size
     pub const BTREE_NODE_SIZE: SuperBlockFlag = SuperBlockFlag(0, 12..28);
     /// Bitmask for percentage of gc reserve
@@ -885,6 +887,15 @@ impl SuperBlockFlag {
     pub const META_REPLICAS_REQ: SuperBlockFlag = SuperBlockFlag(1, 20..24);
     /// Bitmask for number of data replicas required
     pub const DATA_REPLICAS_REQ: SuperBlockFlag = SuperBlockFlag(1, 24..28);
+    /// Bitmask for the promote target device index
+    pub const PROMOTE_TARGET: SuperBlockFlag = SuperBlockFlag(1, 28..40);
+    /// Bitmask for the foreground target device index
+    pub const FOREGROUND_TARGET: SuperBlockFlag = SuperBlockFlag(1, 40..52);
+    /// Bitmask for the background target device index
+    pub const BACKGROUND_TARGET: SuperBlockFlag = SuperBlockFlag(1, 52..64);
+    // index 2
+    /// Bitmask for the background target device index
+    pub const METADATA_TARGET: SuperBlockFlag = SuperBlockFlag(3, 16..28);
 }
 
 /// A set of superblock flags
@@ -923,7 +934,7 @@ impl<T: AsMut<[u8]>> SuperBlockFlags<T> {
         if buf.len() < range.end {
             Err(BchError::Exhausted)
         } else if val > max {
-            Err(BchError::Einval)
+            Err(BchError::Einval(format!("{} > {}", val, max)))
         } else {
             let mut field = LittleEndian::read_u64(&buf[range.clone()]);
             field &= !(max << flag.1.start);

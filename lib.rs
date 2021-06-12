@@ -10,7 +10,7 @@ use libblkid_rs::BlkidErr;
 mod format;
 mod super_block;
 
-pub use format::{format_device, Args as FormatArgs};
+pub use format::{format_device, Args as FormatArgs, ErrorAction};
 
 pub use super_block::{
     DataTypes, Features, Field, MemberField, MemberFlag, SuperBlock, SuperBlockFlag,
@@ -33,7 +33,7 @@ pub enum BchError {
     /// The given buffer was too small
     Exhausted,
     /// The input value is invalid
-    Einval,
+    Einval(String),
 }
 
 impl From<BlkidErr> for BchError {
@@ -84,8 +84,8 @@ impl fmt::Display for BchError {
             &BchError::Exhausted => {
                 write!(f, "Input buffer too short")
             }
-            &BchError::Einval => {
-                write!(f, "Input value invalid")
+            &BchError::Einval(ref s) => {
+                write!(f, "Input value invalid: {}", s)
             }
         }
     }

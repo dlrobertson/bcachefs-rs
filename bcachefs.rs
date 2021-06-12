@@ -10,7 +10,7 @@ use env_logger::Builder;
 use log::{debug, LevelFilter};
 use uuid::Uuid;
 
-use libbcachefs::{self, format_device, BchError, Result};
+use libbcachefs::{self, format_device, BchError, ErrorAction, Result};
 
 /// Bcachefs userspace tooling.
 #[derive(Clap)]
@@ -52,6 +52,14 @@ fn valid_block_size(s: &str) -> std::result::Result<(), String> {
     }
 }
 
+fn is_gt_0(s: &str) -> std::result::Result<(), String> {
+    match s.parse::<u64>() {
+        Ok(size) if size > 0 => Ok(()),
+        Ok(size) => Err(format!("invalid size: {}", size)),
+        _ => Err(format!("failed to parse integer: {}", s)),
+    }
+}
+
 // Most of the complexity comes from sorting out the number of replicas. A
 // user may specify `replicas` OR `data-replicas` AND `metadata-replicas`.
 /// The arguments that the format subcommand may be provided.
@@ -66,18 +74,24 @@ struct FormatArgs {
     #[clap(short = 'm', long = "metadata-replicas")]
     #[clap(requires = "data-replicas")]
     metadata_replicas: Option<u64>,
+    /// The number of metadata-replicas to be required
+    #[clap(long = "metadata-replicas-required", default_value = "1", validator = is_gt_0)]
+    metadata_replicas_req: u64,
     /// The number of data-replicas to be created
     #[clap(short = 'd', long = "data-replicas")]
     #[clap(requires = "metadata-replicas")]
     data_replicas: Option<u64>,
+    /// The number of data-replicas to be required
+    #[clap(long = "data-replicas-required", default_value = "1", validator = is_gt_0)]
+    data_replicas_req: u64,
     /// The formatted device should be encrypted
     #[clap(short = 'e', long = "encrypted")]
     encrypted: bool,
     /// Do not prompt for a passphrase on creation
-    #[clap(long = "--no-passphrase")]
+    #[clap(long = "no-passphrase")]
     no_passphrase: bool,
     /// Do not attempt to initialize the device
-    #[clap(long = "--no-initialize")]
+    #[clap(long = "no-initialize")]
     no_initialize: bool,
     /// The disk label
     #[clap(short = 'l', long = "label", validator = valid_label)]
@@ -94,9 +108,41 @@ struct FormatArgs {
     /// The block size of the new FS
     #[clap(long = "block-size", default_value = "512", validator = valid_block_size)]
     block_size: u16,
+    /// The foreground target of the device set
+    #[clap(long = "foreground-target")]
+    foreground_target: Option<String>,
+    /// The background target of the device set
+    #[clap(long = "background-target")]
+    background_target: Option<String>,
+    /// The background target of the device set
+    #[clap(long = "promote-target")]
+    promote_target: Option<String>,
+    /// The metadata target of the device set
+    #[clap(long = "metadata-target")]
+    metadata_target: Option<String>,
+    /// The action to take on error
+    #[clap(long = "errors", default_value = "ro")]
+    error_action: ErrorAction,
     /// The devices to format
     #[clap(min_values = 1, required = true)]
     devices: Vec<String>,
+}
+
+fn validate_target(
+    opt: &str,
+    target_opt: Option<String>,
+    devices: &[String],
+) -> Result<Option<u64>> {
+    match target_opt {
+        Some(target) => match devices.iter().position(|i| *i == target) {
+            None => Err(BchError::Str(format!(
+                "Given target `{}` for {} is not in device list",
+                target, opt
+            ))),
+            Some(pos) => Ok(Some(pos as u64)),
+        },
+        None => Ok(None),
+    }
 }
 
 impl TryInto<libbcachefs::FormatArgs> for FormatArgs {
@@ -147,6 +193,14 @@ impl TryInto<libbcachefs::FormatArgs> for FormatArgs {
             }
         }
 
+        let promote_target = validate_target("promote-target", self.promote_target, &self.devices)?;
+        let foreground_target =
+            validate_target("foreground-target", self.foreground_target, &self.devices)?;
+        let background_target =
+            validate_target("background-target", self.background_target, &self.devices)?;
+        let metadata_target =
+            validate_target("metadata-target", self.metadata_target, &self.devices)?;
+
         debug!(
             "metadata_replicas={} data_replicas={}",
             metadata_replicas, data_replicas
@@ -154,7 +208,9 @@ impl TryInto<libbcachefs::FormatArgs> for FormatArgs {
 
         Ok(libbcachefs::FormatArgs {
             metadata_replicas,
+            metadata_replicas_req: self.metadata_replicas_req,
             data_replicas,
+            data_replicas_req: self.data_replicas_req,
             encrypted: self.encrypted,
             no_passphrase: self.no_passphrase,
             no_initialize: self.no_initialize,
@@ -163,6 +219,11 @@ impl TryInto<libbcachefs::FormatArgs> for FormatArgs {
             force: self.force,
             superblock_size: self.superblock_size,
             block_size: self.block_size,
+            foreground_target,
+            background_target,
+            promote_target,
+            metadata_target,
+            error_action: self.error_action,
             devices: self.devices,
         })
     }

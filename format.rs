@@ -1,9 +1,11 @@
 use std::cmp;
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::linux::fs::MetadataExt;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::io::AsRawFd;
+use std::str::FromStr;
 
 use crate::super_block::{
     DataTypes, Features, Field, MemberField, MemberFlag, SuperBlock, SuperBlockFlag,
@@ -62,13 +64,52 @@ ioctl_read!(
     u64
 );
 
+/// Action to take on a FS error
+#[derive(Debug, PartialEq)]
+#[repr(u8)]
+pub enum ErrorAction {
+    /// Try to continue
+    Continue = 0,
+    /// Make filesystem read-only
+    ReadOnly = 1,
+    /// Trigger a kernel panic
+    Panic = 2,
+}
+
+impl fmt::Display for ErrorAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            &ErrorAction::Continue => write!(f, "continue"),
+            &ErrorAction::ReadOnly => write!(f, "ro"),
+            &ErrorAction::Panic => write!(f, "panic"),
+        }
+    }
+}
+
+impl FromStr for ErrorAction {
+    type Err = BchError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "continue" => Ok(ErrorAction::Continue),
+            "ro" | "read-only" => Ok(ErrorAction::ReadOnly),
+            "panic" => Ok(ErrorAction::Panic),
+            _ => Err(BchError::Einval(format!("unknown error action: {}", s))),
+        }
+    }
+}
+
 /// Arguments that the format subcommand may be provided.
 #[derive(Debug)]
 pub struct Args {
     /// The number of metadata-replicas to be created
     pub metadata_replicas: u64,
+    /// The number of metadata-replicas to be required
+    pub metadata_replicas_req: u64,
     /// The number of data-replicas to be created
     pub data_replicas: u64,
+    /// The number of data-replicas to be required
+    pub data_replicas_req: u64,
     /// The formatted device should be encrypted
     pub encrypted: bool,
     /// Do not prompt for a passphrase on creation
@@ -86,6 +127,16 @@ pub struct Args {
     pub superblock_size: u64,
     /// The block size of the new FS
     pub block_size: u16,
+    /// The foreground target of the device set
+    pub foreground_target: Option<u64>,
+    /// The background target of the device set
+    pub background_target: Option<u64>,
+    /// The background target of the device set
+    pub promote_target: Option<u64>,
+    /// The metadata target of the device set
+    pub metadata_target: Option<u64>,
+    /// The action to take on error
+    pub error_action: ErrorAction,
     /// The devices to format
     pub devices: Vec<String>,
 }
@@ -185,12 +236,13 @@ fn check_device(device: &String) -> Result<()> {
 fn format(args: Args) -> Result<()> {
     let mut devs = Vec::new();
 
+    debug!("Gathering device info");
     for dev in args.devices.iter() {
         let file = OpenOptions::new().write(true).open(dev)?;
         let block_size = get_blocksize(&file)?;
         let size = get_size(&file)? >> 9;
 
-        debug!("device {}: size={} blocksize={}", dev, size, block_size);
+        debug!("\tdevice {}: size={} blocksize={}", dev, size, block_size);
 
         let mut bucket_size = cmp::max(args.block_size as u64, block_size << 9);
 
@@ -232,6 +284,7 @@ fn format(args: Args) -> Result<()> {
                 dev, nbuckets
             )));
         }
+        debug!("\t\tbucketsize={} nbuckets={}", bucket_size, nbuckets);
 
         let device = Device {
             dev_name: dev.clone(),
@@ -240,7 +293,6 @@ fn format(args: Args) -> Result<()> {
             bucket_size,
             nbuckets,
         };
-        debug!("parsed device {}: {:?}", dev, device);
         devs.push(device);
     }
 
@@ -262,13 +314,11 @@ fn format(args: Args) -> Result<()> {
         )));
     }
 
+    debug!("Zeroing superblock:");
     for (i, dev) in devs.iter().enumerate() {
         let mut file = dev.file()?;
 
-        debug!(
-            "zeroing superblock for name={} index={}",
-            args.devices[i], i
-        );
+        debug!("\tdevice #{}: {}", i, args.devices[i]);
         const ZEROS: [u8; (SB_SECTOR as usize) << 9] = [0x00; ((SB_SECTOR as usize) << 9)];
         file.write(&ZEROS[..])?;
     }
@@ -280,16 +330,6 @@ fn format(args: Args) -> Result<()> {
             .unwrap_or(DEFAULT_BTREE_NODE_SIZE),
         DEFAULT_BTREE_NODE_SIZE,
     );
-
-    let mut flags_buf = [0u8; 64];
-    let mut flags = SuperBlockFlags::from(&mut flags_buf);
-
-    flags.set_flag(SuperBlockFlag::BTREE_NODE_SIZE, btree_node_size)?;
-    flags.set_flag(SuperBlockFlag::GC_RESERVE, 8)?;
-    flags.set_flag(SuperBlockFlag::META_REPLICAS_WANT, args.metadata_replicas)?;
-    flags.set_flag(SuperBlockFlag::DATA_REPLICAS_WANT, args.data_replicas)?;
-    flags.set_flag(SuperBlockFlag::META_REPLICAS_REQ, 1)?;
-    flags.set_flag(SuperBlockFlag::DATA_REPLICAS_REQ, 1)?;
 
     let mut layout_buf = [0u8; 512];
     let mut layout = SuperBlockLayout::from(&mut layout_buf[..]);
@@ -323,34 +363,85 @@ fn format(args: Args) -> Result<()> {
     sb.set_block_size(args.block_size >> 9)?;
     sb.set_nr_devices(args.devices.len() as u8)?;
 
+    debug!("Superblock ID info");
+
     let uuid = Uuid::new_v4();
+    debug!("\tUUID: {}", uuid);
     sb.set_uuid(uuid)?;
+    debug!("\tUser UUID: {}", args.uuid);
     sb.set_user_uuid(args.uuid)?;
 
     if let Some(ref label) = args.label {
+        debug!("\tLabel: {}", &label);
         sb.set_label(&label.clone().into_bytes())?;
     }
 
-    debug!(
-        "Superblock ID info:\n\tlabel: {}\n\tuuid: {}\n\tuser_uuid: {}",
-        args.label.as_ref().unwrap_or(&"(nil)".to_string()),
-        uuid,
-        args.uuid
-    );
-
     sb.set_time_base_p(1)?;
+
+    debug!("Building flags buffer");
+
+    let mut flags_buf = [0u8; 8 * 64];
+    let mut flags = SuperBlockFlags::from(&mut flags_buf);
+
+    flags.set_flag(SuperBlockFlag::BTREE_NODE_SIZE, btree_node_size)?;
+    flags.set_flag(SuperBlockFlag::GC_RESERVE, 8)?;
+    flags.set_flag(SuperBlockFlag::META_REPLICAS_WANT, args.metadata_replicas)?;
+    flags.set_flag(SuperBlockFlag::DATA_REPLICAS_WANT, args.data_replicas)?;
+    flags.set_flag(
+        SuperBlockFlag::META_REPLICAS_REQ,
+        args.metadata_replicas_req,
+    )?;
+    flags.set_flag(SuperBlockFlag::DATA_REPLICAS_REQ, args.data_replicas_req)?;
+    flags.set_flag(SuperBlockFlag::ERROR_ACTION, args.error_action as u64)?;
+
+    debug!("Setting targets");
+
+    if let Some(target) = args.promote_target {
+        debug!(
+            "\tpromote: {} @ index {}",
+            args.devices[target as usize], target
+        );
+        flags.set_flag(SuperBlockFlag::PROMOTE_TARGET, target + 1)?;
+    }
+
+    if let Some(target) = args.foreground_target {
+        debug!(
+            "\tforeground: {} @ index {}",
+            args.devices[target as usize], target
+        );
+        flags.set_flag(SuperBlockFlag::FOREGROUND_TARGET, target + 1)?;
+    }
+
+    if let Some(target) = args.background_target {
+        debug!(
+            "\tbackground: {} @ index {}",
+            args.devices[target as usize], target
+        );
+        flags.set_flag(SuperBlockFlag::BACKGROUND_TARGET, target + 1)?;
+    }
+
+    if let Some(target) = args.metadata_target {
+        debug!(
+            "\tmetadata: {} @ index {}",
+            args.devices[target as usize], target
+        );
+        flags.set_flag(SuperBlockFlag::METADATA_TARGET, target + 1)?;
+    }
+
     sb.set_flags(&flags)?;
     sb.set_layout(&layout)?;
 
     debug!("Building out features 0x{:x}", Features::ALL);
     sb.set_feature(0, Features::ALL)?;
 
+    debug!("Building member fields:");
     let mut member_buf = vec![0u8; 56 * devs.len()];
     for (i, dev) in devs.iter().enumerate() {
         let mut member = MemberField::from(&mut member_buf[(56 * i)..]);
-        debug!("building member field for dev: {}", dev.dev_name);
+        let uuid = Uuid::new_v4();
+        debug!("\tdevice #{}: {} uuid={}", i, dev.dev_name, uuid);
 
-        member.set_uuid(Uuid::new_v4())?;
+        member.set_uuid(uuid)?;
         member.set_n_buckets(dev.nbuckets)?;
         member.set_first_bucket(0)?;
         member.set_bucket_size(dev.bucket_size as u16)?;
