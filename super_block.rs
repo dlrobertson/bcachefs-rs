@@ -75,23 +75,14 @@ bitflags! {
         const BTREE = 1 << 3;
         /// Extents and reflinks may be stored on this device
         const USER = 1 << 4;
-        // FIXME: fix this doc
-        /// **VERY** suspect: the math here is wrong or this is
-        /// outside the bit range of the sb field
-        const CACHED = 1 << 5;
-        // FIXME: fix this doc
-        /// **VERY** suspect: the math here is wrong or this is
-        /// outside the bit range of the sb field
-        const PARITY = 1 << 6;
-        /// Bitset of all the available data types
-        const ALL = Self::SB.bits |
-                    Self::JOURNAL.bits |
-                    Self::BTREE.bits |
-                    Self::USER.bits |
-                    Self::CACHED.bits |
-                    Self::PARITY.bits;
+        // NB: The cached and parity data types do not require
+        // a device allocator and therefore should not be
+        // specified here.
         /// Bitset of the default data types
-        const DEFAULT = Self::JOURNAL.bits | Self::BTREE.bits | Self::USER.bits;
+        const DEFAULT = Self::SB.bits |
+                        Self::JOURNAL.bits |
+                        Self::BTREE.bits |
+                        Self::USER.bits;
     }
 }
 
